@@ -21,3 +21,277 @@ label{font-size:12px;color:#334;margin-top:6px;display:block}
 .table th,.table td{padding:10px;border-bottom:1px solid #e9eef6;text-align:left}
 .status{background:#e8f7ef;color:#0b7a34;padding:4px 8px;border-radius:8px;display:inline-block;font-size:12px}
 @media (max-width:720px){ .row{grid-template-columns:1fr} }
+# GVS / RPB Inspection App — Canvas Plan & Upgrades
+
+This canvas is our **single source of truth** for improving the app. It mirrors your Replit flow and adds production polish: better UX, richer data, stronger PDF, and offline behavior. Use this as a living doc—we’ll turn each box into code.
+
+---
+
+## 1) Goals & Constraints (from you)
+
+* Mobile‑first internal **inspection app** for reps.
+* Flow: **Dashboard → 5‑step wizard (Customer → Distributor → Notes → Areas → Review) → Summary → PDF**.
+* Each **Area** supports: task/area name, category, hazard, **current product (brand, part #, description)**, **issue with current product**, **photo**.
+* Unlimited areas on a single screen; expand/collapse previous entries; **Add New** without new tabs.
+* Summary page: counts & quick stats; **PDF deliverable** branded for **GVS / RPB**.
+* Auth: only reps see their own assessments; 1 admin (you) for now.
+* Stack: Next.js App Router + Supabase (Auth, DB, Storage) + Vercel + PWA.
+
+---
+
+## 2) UX Quick Wins (High‑impact, fast to ship)
+
+* **Sticky footer actions** on the wizard (Back / Next / Finish) so buttons are always visible on mobile.
+* **Stepper header** with 5 labeled steps and live progress %.
+* **Duplicate last area** button to speed data entry when areas are similar.
+* **Reorder areas** via drag handles (optional Phase 2).
+* **Hazard chips + autocomplete** (typeahead plus quick chip taps).
+* **Inline validation** (required fields show subtle tips, not modals).
+* **Camera-first photo capture** (mobile: `capture="environment"` on file input).
+* **Autosave drafts** locally (IndexedDB) + **restore prompt** if a tab refreshes.
+
+### Snippet: Sticky actions bar
+
+```tsx
+// Place at the bottom of wizard pages
+<div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 p-3 flex gap-8 justify-between">
+  <button className="secondary" onClick={onBack}>Back</button>
+  {isLast ? <button onClick={onFinish}>Finish</button> : <button onClick={onNext}>Next</button>}
+</div>
+```
+
+### Snippet: Camera-first input
+
+```tsx
+<input type="file" accept="image/*" capture="environment" onChange={handlePhoto} />
+```
+
+### Snippet: Duplicate last area
+
+```tsx
+const duplicateLast = () => setAreas(a => a.length ? [...a, {...a[a.length-1], photoFile: undefined}] : a);
+```
+
+---
+
+## 3) Data Model Enhancements (Supabase)
+
+**Current tables** cover MVP. Proposed extensions keep backward compatibility.
+
+### inspections (add fields)
+
+* `site_address text` (optional)
+* `contact_primary jsonb` (cached primary contact)
+* `recommended_next_steps text` (freeform summary for PDF cover)
+* `version int default 1` (for future migrations)
+
+### assessments (add fields)
+
+* `severity int` (1–5) — drives summary stats
+* `recommended_product jsonb` (brand, sku, description, image)
+* `photos jsonb` (array) — if you want multiple images later
+
+**Safe migration SQL (phase 2):**
+
+```sql
+alter table public.inspections add column if not exists site_address text;
+alter table public.inspections add column if not exists contact_primary jsonb;
+alter table public.inspections add column if not exists recommended_next_steps text;
+alter table public.inspections add column if not exists version int default 1;
+
+alter table public.assessments add column if not exists severity int;
+alter table public.assessments add column if not exists recommended_product jsonb;
+alter table public.assessments add column if not exists photos jsonb;
+```
+
+---
+
+## 4) Component Architecture (clean & testable)
+
+* `app/assessment/new/page.tsx` → **Wizard** container (steps + progress + sticky actions)
+
+  * `components/StepCustomer.tsx`
+  * `components/StepDistributor.tsx`
+  * `components/StepNotes.tsx`
+  * `components/StepAreas.tsx`
+  * `components/AreaCard.tsx` (collapsible, duplicate, delete)
+  * `components/HazardChips.tsx` (chips + datalist input)
+* `app/assessment/[id]/page.tsx` → Summary & PDF
+
+  * `components/PdfButton.tsx` (accepts inspection + areas)
+* `lib/validation.ts` → Zod schemas (client validation)
+* `lib/storage.ts` → Photo compression + upload helpers
+* `lib/drafts.ts` → IndexedDB autosave/restore
+
+**Action:** split the current big wizard file into these components for readability.
+
+---
+
+## 5) Offline & Photos (PWA polish)
+
+* **Local drafts:** save current wizard state every 3–5 seconds to IndexedDB; restore on load.
+* **Queued uploads:** if offline, queue photos + records and retry when online.
+* **Image compression:** resize on-device before upload (max 1600px wide).
+
+### Snippet: compress with Canvas API
+
+```ts
+export async function compressImage(file: File, maxW = 1600) {
+  const img = await createImageBitmap(file);
+  const scale = Math.min(1, maxW / img.width);
+  const canvas = new OffscreenCanvas(img.width*scale, img.height*scale);
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.8 });
+  return new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
+}
+```
+
+---
+
+## 6) PDF Template Upgrade
+
+**Now:** jsPDF single-column report.
+
+**Next:**
+
+* Cover: logo, customer, distributor, date, **recommended next steps**.
+* TOC: Areas count, hazard breakdown.
+* Area pages: 2‑column layout; image thumb on the right.
+* Footer with page numbers + URL.
+
+### Snippet: cover + footer
+
+```ts
+function pdfHeader(doc, title) {
+  const w = doc.internal.pageSize.getWidth();
+  doc.setFillColor('#003E7E'); doc.rect(0,0,w,60,'F');
+  doc.setTextColor('#fff'); doc.setFontSize(18); doc.text(title, 36, 40);
+  doc.setTextColor('#000');
+}
+function pdfFooter(doc) {
+  const w = doc.internal.pageSize.getWidth();
+  const h = doc.internal.pageSize.getHeight();
+  doc.setFontSize(10); doc.setTextColor('#666');
+  doc.text(`GVS / RPB • ${new Date().toLocaleDateString()}`, 36, h-24);
+  doc.text(`${doc.getCurrentPageInfo().pageNumber}`, w-36, h-24, { align: 'right' });
+}
+```
+
+---
+
+## 7) Branding & Theming
+
+* Centralize brand colors in CSS variables (already in `globals.css`).
+* Swap `public/gvs-logo.svg` for the real logo.
+* PDF uses the same palette (`#003E7E`, `#00A0DF`, `#00B140`).
+
+---
+
+## 8) Accessibility & Performance
+
+* Labels and `aria-describedby` for all inputs.
+* Keyboard navigation (`tabIndex`, space/enter on summary toggles).
+* Reduce layout shift: fixed heights for images placeholders.
+* Preload fonts/icons; lazy‑load the PDF module only on the summary page.
+
+---
+
+## 9) Testing & QA Checklist
+
+* [ ] Create/Sign in user
+* [ ] Wizard step validation (required fields)
+* [ ] Add 5+ areas, duplicate last, reorder (if enabled)
+* [ ] Take photo from camera; ensure compression & upload
+* [ ] Offline draft; reload restores state
+* [ ] Summary hazard counts correct
+* [ ] PDF contains images and wraps long text
+* [ ] RLS: different users can’t see each other’s inspections
+
+---
+
+## 10) Roadmap & Issues (copy into GitHub)
+
+**P0 (Now)**
+
+* [ ] Split wizard into components; add **sticky footer actions** and **stepper**
+* [ ] Add **Duplicate last area** and **Delete area**
+* [ ] Add `capture="environment"` to photos + client **compression**
+* [ ] Improve PDF: cover + footer + hazard summary section
+
+**P1 (Next)**
+
+* [ ] IndexedDB draft autosave/restore
+* [ ] Drag‑reorder areas (dnd-kit)
+* [ ] Severity rating + recommended product
+
+**P2 (Later)**
+
+* [ ] Admin dashboard (you)
+* [ ] Private storage with signed URLs
+* [ ] Bulk export and email delivery
+
+---
+
+## 11) Drop‑in Code Patches (ready to implement)
+
+### A) Wizard sticky actions (replace wizard footer)
+
+```tsx
+// components/WizardFooter.tsx
+export default function WizardFooter({ onBack, onNext, onFinish, isFirst, isLast }) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 p-3 flex gap-8 justify-between">
+      <button className="secondary" onClick={onBack} disabled={isFirst}>Back</button>
+      {isLast ? (
+        <button onClick={onFinish}>Finish</button>
+      ) : (
+        <button onClick={onNext}>Next</button>
+      )}
+    </div>
+  );
+}
+```
+
+### B) AreaCard actions (duplicate/delete)
+
+```tsx
+// components/AreaCard.tsx (inside summary header)
+<div style={{display:'flex', gap:8}}>
+  <button className="secondary" onClick={()=>onDuplicate(index)}>Duplicate</button>
+  <button className="secondary" onClick={()=>onDelete(index)}>Delete</button>
+</div>
+```
+
+### C) Photo compression on upload
+
+```tsx
+import { compressImage } from '../lib/storage';
+
+<input type="file" accept="image/*" capture="environment" onChange={async e=>{
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const small = await compressImage(f);
+  updateArea(idx,{ photoFile: small });
+}}/>
+```
+
+---
+
+## 12) Deployment Notes
+
+* Vercel env vars (already set): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+* For storage privacy later: switch bucket to **private** and generate **signed URLs** in the summary page.
+* Keep Typescript & @types pinned to avoid Vercel build hiccups.
+
+---
+
+## 13) What do you want first?
+
+Pick one of these and I’ll generate the exact file changes on the next turn:
+
+1. **Wizard refactor** (stepper + sticky actions + duplicate/delete area)
+2. **Photo compression & camera capture**
+3. **PDF cover, footer, and hazard summary**
+4. **Autosave draft (IndexedDB) + restore**
+5. **Admin dashboard stub (your account only)**
